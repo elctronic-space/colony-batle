@@ -1,0 +1,844 @@
+
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Colony Simulator 9.7.7</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#111b24;color:white;font-family:Arial;text-align:center}
+header{padding:12px;background:#1c2d3a}
+h2{margin:4px}
+button{background:#294252;color:white;border:1px solid #557080;border-radius:7px;padding:9px;margin:3px;font-weight:bold}
+button:active,.active{background:#b17b34}
+#toolbar,#builds{padding:6px;background:#192936}
+#stats{padding:8px;background:#223846;font-size:13px;line-height:1.8}
+canvas{display:block;width:100%;max-width:960px;height:auto;margin:auto;touch-action:manipulation;background:#263b35}
+#message{min-height:28px;padding:7px;color:#ffe28a;font-size:13px}
+.small{font-size:12px;color:#b9c8d1}
+</style>
+</head>
+<body>
+<header>
+<h2>🌍 Colony Simulator 9.7.7</h2>
+<div class="small">Buduj imperium i podbijaj świat!</div>
+</header>
+<div id="toolbar">
+<button id="newWorld">🌍 Nowy świat</button>
+<button id="pauseBtn">⏸️ Pauza</button>
+<button id="speedBtn">⏩ x1</button>
+</div>
+<div id="stats">Stwórz nowy świat!</div>
+<div id="builds">
+<button data-mode="select" class="active">👆 Wybierz</button>
+<button data-mode="farm">🌾 Farma</button>
+<button data-mode="factory">🏭 Fabryka</button>
+<button data-mode="castle">🏰 Zamek</button>
+<button data-mode="wall">🧱 Mur</button>
+<button data-mode="meteor">☄️ Meteor</button>
+<button data-mode="heal">💚 Leczenie</button>
+</div>
+<canvas id="game" width="960" height="600"></canvas>
+<div id="message">Gotowy do stworzenia świata!</div>
+<div id="toolbar">
+<button id="allyBtn">🤝 Sojusz</button>
+<button id="helpBtn">❔ Pomoc</button>
+</div>
+
+<script>
+"use strict";
+
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+const W=40,H=25,S=24,MAX_UNITS=20;
+
+const COLORS=["#ef4444","#3b82f6","#eab308","#a855f7","#22c55e","#f97316","#ec4899","#06b6d4","#a3a3a3","#f8fafc"];
+const NAMES=["Czerwona","Niebieska","Żółta","Fioletowa","Zielona","Pomarańczowa","Różowa","Turkusowa","Szara","Biała"];
+const COST={farm:[20,5],factory:[55,25],castle:[90,40],wall:[12,4]};
+
+let grid=[],colonies=[],units=[];
+let running=false,paused=false,speed=1,mode="select";
+let selectedColony=null,lastTime=0,tick=0;
+
+const rand=n=>Math.floor(Math.random()*n);
+const inside=(x,y)=>x>=0&&y>=0&&x<W&&y<H;
+const tile=(x,y)=>inside(x,y)&&grid[y]?grid[y][x]:null;
+const say=t=>document.getElementById("message").textContent=t;
+
+function friendly(owner,c){
+ return owner===c||(!!c.ally&&owner===c.ally);
+}
+
+function makeUnit(c,x,y,type="warrior"){
+ const u={
+  colony:c,x:x+.5,y:y+.5,type,
+  hp:type==="heavy"?130:75,
+  maxHp:type==="heavy"?130:75,
+  target:null,capture:0,attack:0,retarget:0
+ };
+ units.push(u);
+ c.units.push(u);
+}
+
+function newWorld(){
+ grid=Array.from({length:H},()=>Array.from({length:W},()=>({owner:null,building:null})));
+ colonies=[];
+ units=[];
+ selectedColony=null;
+ tick=0;
+ paused=false;
+ running=true;
+
+ const positions=[[4,4],[20,3],[35,4],[5,18],[20,20],[35,18],[12,10],[28,10],[12,22],[28,22]];
+
+ for(let i=positions.length-1;i>0;i--){
+  let j=rand(i+1);
+  [positions[i],positions[j]]=[positions[j],positions[i]];
+ }
+
+ const count=2+rand(9);
+
+ for(let i=0;i<count;i++){
+  const [x,y]=positions[i];
+  const c={
+   id:i,name:NAMES[i],color:COLORS[i],
+   gold:130,wood:65,food:45,mana:50,
+   ally:null,units:[],farms:0,factories:0,
+   kills:0,alive:true,spawn:0,heavy:0,buildTimer:0
+  };
+
+  colonies.push(c);
+
+  for(let yy=-2;yy<=2;yy++){
+   for(let xx=-2;xx<=2;xx++){
+    if(xx*xx+yy*yy<=5&&inside(x+xx,y+yy)){
+     grid[y+yy][x+xx].owner=c;
+    }
+   }
+  }
+
+  grid[y][x].building={type:"base"};
+  makeUnit(c,x-1,y);
+  makeUnit(c,x+1,y);
+  makeUnit(c,x,y+1);
+ }
+
+ selectedColony=colonies[0];
+ document.getElementById("pauseBtn").textContent="⏸️ Pauza";
+ say("🌍 Świat powstał! Kolonie: "+count);
+ updateStats();
+ draw();
+}
+
+function countUnits(c){
+ return units.filter(u=>u.colony===c).length;
+}
+
+function findBase(c){
+ for(let y=0;y<H;y++){
+  for(let x=0;x<W;x++){
+   if(grid[y][x].owner===c&&grid[y][x].building?.type==="base"){
+    return{x,y};
+   }
+  }
+ }
+ return null;
+}
+
+function reserved(x,y,u){
+ return units.some(v=>v!==u&&v.colony===u.colony&&v.target?.x===x&&v.target?.y===y);
+}
+
+function findCaptureTarget(u){
+ const c=u.colony;
+
+ for(let pass=0;pass<2;pass++){
+  let best=null,bestScore=Infinity;
+
+  for(let y=0;y<H;y++){
+   for(let x=0;x<W;x++){
+    const t=grid[y][x];
+
+    if(t.building||friendly(t.owner,c)||reserved(x,y,u))continue;
+    if(pass===0&&t.owner!==null)continue;
+    if(pass===1&&t.owner===null)continue;
+
+    let frontier=Infinity;
+
+    for(let yy=Math.max(0,y-2);yy<=Math.min(H-1,y+2);yy++){
+     for(let xx=Math.max(0,x-2);xx<=Math.min(W-1,x+2);xx++){
+      if(friendly(grid[yy][xx].owner,c)){
+       frontier=Math.min(frontier,Math.hypot(xx-x,yy-y));
+      }
+     }
+    }
+
+    if(frontier>2.3)continue;
+
+    const distance=Math.hypot(u.x-(x+.5),u.y-(y+.5));
+    const score=distance+frontier*1.5+Math.random()*.35+(pass===1?1000:0);
+
+    if(score<bestScore){
+     bestScore=score;
+     best={x,y};
+    }
+   }
+  }
+
+  if(best)return best;
+ }
+ return null;
+}
+
+/* AGRESYWNE WYKRYWANIE WROGÓW */
+function nearestEnemy(u,r){
+ let best=null,bd=r;
+
+ for(const e of units){
+  if(e===u||friendly(e.colony,u.colony))continue;
+  const d=Math.hypot(e.x-u.x,e.y-u.y);
+  if(d<bd){bd=d;best=e}
+ }
+ return best;
+}
+
+function removeUnit(u){
+ units=units.filter(v=>v!==u);
+ u.colony.units=u.colony.units.filter(v=>v!==u);
+}
+
+function moveUnit(u,x,y,dt){
+ const dx=x-u.x,dy=y-u.y,d=Math.hypot(dx,dy);
+ if(d<.06)return true;
+
+ /* Szybszy ruch wojowników */
+ const step=(u.type==="heavy"?1.25:1.85)*dt;
+ const amount=Math.min(step,d);
+ u.x+=dx/d*amount;
+ u.y+=dy/d*amount;
+ return d<=step+.06;
+}
+
+function updateUnit(u,dt){
+ /* Wojownicy widzą wrogów z większej odległości */
+ const enemy=nearestEnemy(u,6.5);
+
+ if(enemy){
+  const d=Math.hypot(enemy.x-u.x,enemy.y-u.y);
+
+  if(d>1.0){
+   moveUnit(u,enemy.x,enemy.y,dt);
+  }else{
+   u.attack-=dt;
+
+   if(u.attack<=0){
+    /* Mocniejsze ciosy i szybsze ataki */
+    enemy.hp-=u.type==="heavy"?32:18;
+    u.attack=u.type==="heavy"?.65:.8;
+
+    if(enemy.hp<=0){
+     u.colony.kills++;
+     u.colony.gold+=12;
+     removeUnit(enemy);
+    }
+   }
+  }
+  return;
+ }
+
+ /* Częstsze szukanie nowych celów */
+ u.retarget-=dt;
+
+ if(u.retarget<=0){
+  u.retarget=.65;
+  const newTarget=findCaptureTarget(u);
+
+  if(newTarget){
+   const current=tile(u.target?.x,u.target?.y);
+   const currentIsEnemy=current&&current.owner!==null&&!friendly(current.owner,u.colony);
+
+   if(!u.target||!current||friendly(current.owner,u.colony)||
+      (currentIsEnemy&&grid[newTarget.y][newTarget.x].owner===null)){
+    u.target=newTarget;
+    u.capture=0;
+   }
+  }
+ }
+
+ if(!u.target){
+  u.target=findCaptureTarget(u);
+  if(!u.target)return;
+ }
+
+ const t=tile(u.target.x,u.target.y);
+
+ if(!t||t.building||friendly(t.owner,u.colony)){
+  u.target=null;
+  u.capture=0;
+  return;
+ }
+
+ const reached=moveUnit(u,u.target.x+.5,u.target.y+.5,dt);
+ const distance=Math.hypot(u.x-u.target.x-.5,u.y-u.target.y-.5);
+
+ if(reached||distance<.22){
+  u.capture+=dt;
+
+  /* Szybsze przejmowanie pól */
+  if(u.capture>.18){
+   t.owner=u.colony;
+   u.target=null;
+   u.capture=0;
+   u.retarget=0;
+   u.colony.gold+=3;
+  }
+ }else{
+  u.capture=0;
+ }
+}
+
+/* AI: częstsze budowanie */
+function tryBuild(c){
+ const b=findBase(c);
+ if(!b)return;
+
+ let spots=[];
+
+ for(let y=0;y<H;y++){
+  for(let x=0;x<W;x++){
+   if(grid[y][x].owner===c&&!grid[y][x].building){
+    const d=Math.hypot(x-b.x,y-b.y);
+    if(d<=9)spots.push({x,y});
+   }
+  }
+ }
+
+ if(!spots.length)return;
+
+ const p=spots[rand(spots.length)];
+ const roll=Math.random();
+ let choices;
+
+ if(roll<.43)choices=["farm","farm","farm","castle","factory","wall"];
+ else if(roll<.73)choices=["castle","castle","farm","factory","wall"];
+ else if(roll<.91)choices=["factory","farm","castle","wall"];
+ else choices=["wall","farm","castle"];
+
+ for(const type of choices){
+  const cost=COST[type];
+
+  if(c.gold>=cost[0]&&c.wood>=cost[1]){
+   if(type==="factory"&&c.factories>=3)continue;
+
+   grid[p.y][p.x].building={
+    type,
+    castleTimer:0
+   };
+
+   c.gold-=cost[0];
+   c.wood-=cost[1];
+
+   if(type==="farm")c.farms++;
+   if(type==="factory")c.factories++;
+
+   return;
+  }
+ }
+}
+
+/* Produkcja wojowników w zamkach */
+function updateCastleSpawning(c,dt){
+ for(let y=0;y<H;y++){
+  for(let x=0;x<W;x++){
+   const t=grid[y][x];
+
+   if(t.owner!==c||t.building?.type!=="castle")continue;
+
+   const castle=t.building;
+   castle.castleTimer=(castle.castleTimer||0)+dt;
+
+   if(castle.castleTimer>=6){
+    castle.castleTimer=0;
+
+    if(countUnits(c)<MAX_UNITS&&c.food>=4){
+     makeUnit(c,x,y);
+     c.food-=4;
+    }
+   }
+  }
+ }
+}
+
+function updateColonies(dt){
+ for(const c of colonies){
+  if(!c.alive)continue;
+
+  c.spawn+=dt;
+  c.heavy+=dt;
+  c.buildTimer+=dt;
+
+  c.gold+=dt*(1+c.farms*.3);
+  c.wood+=dt*(.6+c.farms*.18);
+  c.food+=dt*(.7+c.farms*.4);
+  c.mana=Math.min(100,c.mana+dt*.7);
+
+  if(c.spawn>=10){
+   c.spawn=0;
+
+   if(countUnits(c)<MAX_UNITS&&c.food>=5){
+    const b=findBase(c);
+    if(b){
+     makeUnit(c,b.x,b.y);
+     c.food-=5;
+    }
+   }
+  }
+
+  if(c.factories&&c.heavy>=8){
+   c.heavy=0;
+
+   if(countUnits(c)<MAX_UNITS&&c.gold>=15&&c.food>=5){
+    const b=findBase(c);
+    if(b){
+     makeUnit(c,b.x,b.y,"heavy");
+     c.gold-=15;
+     c.food-=5;
+    }
+   }
+  }
+
+  updateCastleSpawning(c,dt);
+
+  if(c.buildTimer>=4){
+   c.buildTimer=0;
+   tryBuild(c);
+  }
+ }
+}
+
+function update(dt){
+ if(!running||paused)return;
+
+ dt*=speed;
+ tick+=dt;
+
+ updateColonies(dt);
+
+ for(const u of [...units]){
+  if(units.includes(u))updateUnit(u,dt);
+ }
+
+ if(tick>=1){
+  tick=0;
+  updateStats();
+ }
+
+ const alive=colonies.filter(c=>c.alive);
+
+ if(alive.length<=1&&colonies.length>1){
+  running=false;
+  say(alive.length?"🏆 Zwycięża "+alive[0].name+"!":"Wszystkie kolonie upadły!");
+ }
+}
+
+/* Tekstury budynków */
+function rect(x,y,w,h,color){
+ ctx.fillStyle=color;
+ ctx.fillRect(x,y,w,h);
+}
+
+function line(x1,y1,x2,y2,color,width=1){
+ ctx.strokeStyle=color;
+ ctx.lineWidth=width;
+ ctx.beginPath();
+ ctx.moveTo(x1,y1);
+ ctx.lineTo(x2,y2);
+ ctx.stroke();
+}
+
+function drawStone(x,y,w,h){
+ rect(x,y,w,h,"#7e8990");
+ rect(x+1,y+1,w-2,h-2,"#aab3b8");
+
+ for(let yy=y+4;yy<y+h-2;yy+=5){
+  line(x+1,yy,x+w-1,yy,"#77838a",1);
+ }
+
+ for(let xx=x+4;xx<x+w;xx+=7){
+  line(xx,y+1,xx,y+h-1,"#89949b",1);
+ }
+
+ line(x+1,y+1,x+w-1,y+1,"#d2d9dc",1);
+}
+
+function drawRoof(x,y,w,h,color){
+ ctx.fillStyle=color;
+ ctx.beginPath();
+ ctx.moveTo(x,y+h);
+ ctx.lineTo(x+w/2,y);
+ ctx.lineTo(x+w,y+h);
+ ctx.closePath();
+ ctx.fill();
+
+ line(x+2,y+h-1,x+w/2,y+2,"#ffffff55",1);
+ line(x+w/2,y+2,x+w-2,y+h-1,"#00000055",1);
+}
+
+function drawBuilding(type,x,y,owner){
+ ctx.save();
+ ctx.translate(x*S+12,y*S+12);
+ rect(-10,8,20,3,"#00000035");
+
+ if(type==="base"){
+  drawStone(-9,-7,18,16);
+  rect(-7,-11,14,5,owner.color);
+  rect(-5,-9,10,2,"#ffffff55");
+  drawRoof(-10,-13,20,7,"#6c3434");
+  rect(-3,0,6,9,"#49372b");
+  rect(-1,2,2,7,"#b58b56");
+  rect(-7,-5,3,4,"#7dd5e8");
+  rect(4,-5,3,4,"#7dd5e8");
+  rect(-8,7,16,2,"#d4d9dc");
+ }
+ else if(type==="farm"){
+  rect(-10,-5,20,13,"#80613c");
+  rect(-9,-4,18,11,"#9c7849");
+
+  for(let i=-7;i<=7;i+=5){
+   line(i,-3,i,6,"#e2c77a",2);
+   line(i+2,-3,i+2,6,"#5d8c3e",1);
+  }
+
+  for(let i=-6;i<=6;i+=6){
+   rect(i,-7,2,5,"#4d913f");
+   rect(i-2,-5,3,2,"#78bb4c");
+   rect(i+1,-4,3,2,"#a2ce55");
+  }
+
+  rect(-10,7,20,2,"#57412c");
+  rect(-10,-8,20,2,"#c4a46a");
+ }
+ else if(type==="factory"){
+  drawStone(-9,-6,18,14);
+  rect(-7,-8,14,4,"#777f85");
+  drawRoof(-9,-12,18,7,"#555e66");
+  rect(-3,-3,7,11,"#454b50");
+  rect(-2,-2,5,10,"#242a30");
+  rect(4,-14,5,11,"#515960");
+  rect(3,-15,7,2,"#333b42");
+  rect(5,-18,3,3,"#777f85");
+  rect(-7,-4,4,4,"#ffcb61");
+  rect(-1,-4,3,4,"#ffcb61");
+  line(-7,7,8,7,"#d5dce0",1);
+ }
+ else if(type==="castle"){
+  drawStone(-8,-5,16,14);
+  drawStone(-10,-12,6,20);
+  drawStone(4,-12,6,20);
+  rect(-11,-14,8,4,"#8d969d");
+  rect(3,-14,8,4,"#8d969d");
+  rect(-9,-16,4,4,"#68737b");
+  rect(5,-16,4,4,"#68737b");
+  rect(-2,-9,4,18,"#4a3830");
+  rect(-1,-5,2,4,"#c49a5c");
+  rect(-8,-8,3,4,"#77c9e5");
+  rect(5,-8,3,4,"#77c9e5");
+  rect(-2,-18,4,7,owner.color);
+  line(0,-18,0,-22,"#d8d8d8",1);
+  rect(0,-22,7,4,owner.color);
+  rect(-9,8,18,2,"#d2d9dc");
+ }
+ else if(type==="wall"){
+  drawStone(-11,-5,22,12);
+  rect(-11,-9,5,5,"#9ba5ac");
+  rect(-3,-9,6,5,"#9ba5ac");
+  rect(6,-9,5,5,"#9ba5ac");
+  rect(-10,-8,3,3,"#c4cbd0");
+  rect(-2,-8,4,3,"#c4cbd0");
+  rect(7,-8,3,3,"#c4cbd0");
+  line(-10,1,10,1,"#69747c",1);
+  line(-5,-4,-5,5,"#707b83",1);
+  line(3,-4,3,5,"#707b83",1);
+ }
+
+ ctx.restore();
+}
+
+function drawWarrior(u){
+ const x=u.x*S,y=u.y*S,c=u.colony.color;
+ ctx.save();
+ ctx.translate(x,y);
+
+ ctx.fillStyle="rgba(0,0,0,.3)";
+ ctx.fillRect(-5,6,11,3);
+
+ rect(-4,2,3,6,"#30343b");
+ rect(2,2,3,6,"#30343b");
+ rect(-5,-4,10,7,c);
+ rect(-5,-4,10,2,"#222");
+ rect(-3,-10,7,6,"#e7bd8e");
+ rect(-4,-12,9,4,"#929da5");
+ rect(-4,-9,9,2,"#626e78");
+ rect(6,-9,2,13,"#c6ced5");
+ rect(5,1,4,2,"#765332");
+
+ if(u.type==="heavy"){
+  rect(-6,-5,12,3,"#e5c45c");
+  rect(-5,-13,10,2,"#e5c45c");
+ }
+
+ rect(-6,-16,13,2,"#451c1c");
+ rect(-6,-16,13*Math.max(0,u.hp/u.maxHp),2,"#45e16a");
+
+ ctx.restore();
+}
+
+function draw(){
+ ctx.clearRect(0,0,960,600);
+
+ if(!grid.length){
+  ctx.fillStyle="#263b35";
+  ctx.fillRect(0,0,960,600);
+  ctx.fillStyle="white";
+  ctx.textAlign="center";
+  ctx.font="bold 28px Arial";
+  ctx.fillText("COLONY SIMULATOR",480,270);
+  ctx.font="17px Arial";
+  ctx.fillText("Naciśnij NOWY ŚWIAT",480,305);
+  return;
+ }
+
+ for(let y=0;y<H;y++){
+  for(let x=0;x<W;x++){
+   const t=grid[y][x],px=x*S,py=y*S;
+   ctx.fillStyle=t.owner?t.owner.color:"#31483d";
+   ctx.globalAlpha=t.owner?.24:1;
+   ctx.fillRect(px,py,S,S);
+   ctx.globalAlpha=1;
+   ctx.strokeStyle="rgba(0,0,0,.15)";
+   ctx.strokeRect(px,py,S,S);
+
+   if(t.owner&&t.building){
+    drawBuilding(t.building.type,x,y,t.owner);
+   }
+  }
+ }
+
+ for(const u of units)drawWarrior(u);
+
+ if(paused){
+  ctx.fillStyle="rgba(0,0,0,.4)";
+  ctx.fillRect(0,0,960,600);
+  ctx.fillStyle="white";
+  ctx.font="bold 36px Arial";
+  ctx.textAlign="center";
+  ctx.fillText("PAUZA",480,300);
+ }
+}
+
+function updateStats(){
+ if(!colonies.length)return;
+
+ let html="";
+
+ for(const c of colonies){
+  const land=grid.flat().filter(t=>t.owner===c).length;
+  const castles=grid.flat().filter(t=>t.owner===c&&t.building?.type==="castle").length;
+
+  html+=`<span style="color:${c.color}">■ <b>${c.name}</b></span> Ziemia: ${land} | 🏰 ${castles} | ⚔️ ${countUnits(c)}/20 | 💰 ${Math.floor(c.gold)} | 🪵 ${Math.floor(c.wood)} | 🌾 ${Math.floor(c.food)} | 🪄 ${Math.floor(c.mana)} | ☠️ ${c.kills}<br>`;
+ }
+
+ document.getElementById("stats").innerHTML=html;
+}
+
+function castMeteor(x,y){
+ const c=selectedColony;
+ if(!c)return;
+
+ if(c.mana<30||c.gold<35){
+  say("Meteor kosztuje 35 złota i 30 many!");
+  return;
+ }
+
+ c.gold-=35;
+ c.mana-=30;
+
+ for(const u of [...units]){
+  if(!friendly(u.colony,c)&&Math.hypot(u.x-x-.5,u.y-y-.5)<3){
+   u.hp-=85;
+   if(u.hp<=0){c.kills++;removeUnit(u)}
+  }
+ }
+
+ const t=tile(x,y);
+
+ if(t&&t.owner&&!friendly(t.owner,c)){
+  t.owner=c;
+  if(t.building?.type!=="base")t.building=null;
+ }
+
+ say("☄️ Meteor uderzył!");
+ updateStats();
+}
+
+function castHeal(x,y){
+ const c=selectedColony;
+ if(!c)return;
+
+ if(c.mana<20){
+  say("Leczenie kosztuje 20 many!");
+  return;
+ }
+
+ c.mana-=20;
+ let healed=0;
+
+ for(const u of units){
+  if(u.colony===c&&Math.hypot(u.x-x-.5,u.y-y-.5)<4){
+   u.hp=Math.min(u.maxHp,u.hp+55);
+   healed++;
+  }
+ }
+
+ say("💚 Uleczono wojowników: "+healed);
+ updateStats();
+}
+
+function buildAt(x,y){
+ const t=tile(x,y);
+ if(!t)return;
+
+ if(mode==="meteor"){castMeteor(x,y);return}
+ if(mode==="heal"){castHeal(x,y);return}
+
+ if(mode==="select"){
+  if(t.owner){
+   selectedColony=t.owner;
+   say("Wybrano: "+t.owner.name);
+  }
+  return;
+ }
+
+ const c=selectedColony;
+
+ if(!c||t.owner!==c){
+  say("Buduj tylko na własnym terenie!");
+  return;
+ }
+
+ if(t.building){
+  say("To pole ma już budynek!");
+  return;
+ }
+
+ const cost=COST[mode];
+ if(!cost)return;
+
+ if(c.gold<cost[0]||c.wood<cost[1]){
+  say("Za mało zasobów!");
+  return;
+ }
+
+ c.gold-=cost[0];
+ c.wood-=cost[1];
+ t.building={type:mode,castleTimer:0};
+
+ if(mode==="farm")c.farms++;
+ if(mode==="factory")c.factories++;
+
+ say(mode==="castle"?"🏰 Zamek zbudowany! Będzie produkował wojowników.":"Zbudowano budynek!");
+ updateStats();
+}
+
+canvas.addEventListener("click",e=>{
+ if(!running)return;
+
+ const r=canvas.getBoundingClientRect();
+ const x=Math.floor((e.clientX-r.left)/r.width*W);
+ const y=Math.floor((e.clientY-r.top)/r.height*H);
+
+ if(inside(x,y))buildAt(x,y);
+});
+
+document.getElementById("newWorld").onclick=newWorld;
+
+document.getElementById("pauseBtn").onclick=()=>{
+ if(!running)return;
+ paused=!paused;
+ document.getElementById("pauseBtn").textContent=paused?"▶️ Wznów":"⏸️ Pauza";
+ draw();
+};
+
+document.getElementById("speedBtn").onclick=()=>{
+ speed=speed===1?2:speed===2?3:1;
+ document.getElementById("speedBtn").textContent="⏩ x"+speed;
+};
+
+document.querySelectorAll("[data-mode]").forEach(b=>{
+ b.onclick=()=>{
+  mode=b.dataset.mode;
+  document.querySelectorAll("[data-mode]").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active");
+
+  say(
+   mode==="select"?"Wybierz kolonię.":
+   mode==="meteor"?"Wybierz miejsce uderzenia.":
+   mode==="heal"?"Wybierz miejsce leczenia.":
+   "Wybierz własne wolne pole."
+  );
+ };
+});
+
+document.getElementById("allyBtn").onclick=()=>{
+ if(!selectedColony){
+  say("Najpierw wybierz kolonię!");
+  return;
+ }
+
+ const opts=colonies.filter(c=>c!==selectedColony&&c.alive&&!friendly(c,selectedColony));
+
+ if(!opts.length){
+  say("Brak dostępnej kolonii.");
+  return;
+ }
+
+ const other=opts[rand(opts.length)];
+
+ if(selectedColony.ally)selectedColony.ally.ally=null;
+
+ selectedColony.ally=other;
+ other.ally=selectedColony;
+
+ say("🤝 Sojusz: "+selectedColony.name+" i "+other.name);
+};
+
+document.getElementById("helpBtn").onclick=()=>alert(
+ "COLONY SIMULATOR 9.7.7\n\n"+
+ "Kolonie walczą bardziej agresywnie.\n"+
+ "Wojownicy wykrywają wrogów z większej odległości.\n"+
+ "Zadają większe obrażenia i szybciej się poruszają.\n"+
+ "Wojownicy najpierw zdobywają neutralne pola.\n"+
+ "Potem mogą atakować wrogie kolonie.\n"+
+ "Zamki produkują wojowników co 6 sekund.\n"+
+ "Baza produkuje wojowników co 10 sekund.\n"+
+ "Fabryka tworzy ciężkich wojowników.\n"+
+ "Kolonie budują farmy, zamki, fabryki i mury.\n"+
+ "Maksymalnie 20 wojowników na kolonię."
+);
+
+function frame(time){
+ if(!lastTime)lastTime=time;
+ const dt=Math.min((time-lastTime)/1000,.05);
+ lastTime=time;
+ update(dt);
+ draw();
+ requestAnimationFrame(frame);
+}
+
+draw();
+requestAnimationFrame(frame);
+</script>
+</body>
+  </html>
+  
